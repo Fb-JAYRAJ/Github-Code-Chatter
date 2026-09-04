@@ -19,7 +19,7 @@ class RAGPipeline:
         self,
         repository_id: str,
         top_k: int = 5,
-        model: str = "gemini-3.7-flash",
+        model: str = "gemini-3.6-flash",
     ):
         """
         Initialize the RAG pipeline.
@@ -35,18 +35,12 @@ class RAGPipeline:
                 Gemini generation model.
         """
 
-        api_key = os.getenv(
-            "GEMINI_API_KEY"
-        )
+        api_key = os.getenv("GEMINI_API_KEY")
 
         if not api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is not set."
-            )
+            raise ValueError("GEMINI_API_KEY is not set.")
 
-        self.client = genai.Client(
-            api_key=api_key
-        )
+        self.client = genai.Client(api_key=api_key)
 
         self.model = model
 
@@ -70,82 +64,53 @@ class RAGPipeline:
         """
 
         if not question or not question.strip():
-            raise ValueError(
-                "Question cannot be empty."
-            )
+            raise ValueError("Question cannot be empty.")
 
-        # -----------------------------------------------------
         # 1. Retrieve relevant code
-        # -----------------------------------------------------
+        results = self.retriever.retrieve(question)
 
-        results = self.retriever.retrieve(
-            question
-        )
-
-        # -----------------------------------------------------
         # 2. Handle no results
-        # -----------------------------------------------------
-
         if not results:
             return {
                 "answer": (
                     "I couldn't find relevant code "
-                    "in the repository to answer "
-                    "that question."
+                    "in the repository to answer that question."
                 ),
                 "sources": [],
                 "retrieved_chunks": [],
             }
 
-        # -----------------------------------------------------
         # 3. Build LLM context
-        # -----------------------------------------------------
+        context = self.retriever.build_context(results)
 
-        context = (
-            self.retriever.build_context(
-                results
-            )
-        )
-
-        # -----------------------------------------------------
         # 4. Build grounded prompt
-        # -----------------------------------------------------
+        prompt = self._build_prompt(question=question, context=context)
 
-        prompt = self._build_prompt(
-            question=question,
-            context=context,
-        )
+        # 5. Extract sources FIRST — depends only on `results`,
+        #    so it must exist no matter what happens with the LLM call below.
+        sources = self._extract_sources(results)
 
-        # -----------------------------------------------------
-        # 5. Generate answer
-        # -----------------------------------------------------
-
-        response = (
-            self.client.models.generate_content(
+        # 6. Generate answer
+        try:
+            api_result = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
             )
-        )
+            final_answer = api_result.text if api_result.text else "The model did not return an answer."
 
-        answer = (
-            response.text
-            if response.text
-            else (
-                "The model did not return "
-                "an answer."
-            )
-        )
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                final_answer = (
+                    "⚠️ **Google's Gemini API is currently overloaded (503).**\n\n"
+                    "However, your local retrieval is working! Here is the exact code I retrieved:\n\n"
+                    f"{context}"
+                )
+            else:
+                final_answer = f"⚠️ Could not generate an answer: {e}"
 
-        # -----------------------------------------------------
-        # 6. Extract source information
-        # -----------------------------------------------------
-
-        sources = self._extract_sources(
-            results
-        )
-
+        # 7. Single return, always fully populated
         return {
-            "answer": answer,
+            "answer": final_answer,
             "sources": sources,
             "retrieved_chunks": results,
         }
@@ -244,58 +209,33 @@ USER QUESTION
         """
 
         sources = []
-
         seen = set()
 
         for result in results:
-
-            source = result.get(
-                "source",
-                {},
-            )
-
-            file_path = source.get(
-                "file_path"
-            )
+            source = result.get("source", {})
+            file_path = source.get("file_path")
 
             if not file_path:
                 continue
 
-            start_line = source.get(
-                "start_line"
-            )
+            start_line = source.get("start_line")
+            end_line = source.get("end_line")
 
-            end_line = source.get(
-                "end_line"
-            )
-
-            source_key = (
-                file_path,
-                start_line,
-                end_line,
-            )
+            source_key = (file_path, start_line, end_line)
 
             if source_key in seen:
                 continue
 
-            seen.add(
-                source_key
-            )
+            seen.add(source_key)
 
             sources.append(
                 {
                     "file_path": file_path,
-                    "name": source.get(
-                        "name"
-                    ),
-                    "type": source.get(
-                        "type"
-                    ),
+                    "name": source.get("name"),
+                    "type": source.get("type"),
                     "start_line": start_line,
                     "end_line": end_line,
-                    "repository": source.get(
-                        "repository"
-                    ),
+                    "repository": source.get("repository"),
                 }
             )
 
@@ -304,9 +244,7 @@ USER QUESTION
 
 if __name__ == "__main__":
 
-    TEST_REPOSITORY_ID = (
-        "bb69cc12b4b06266"
-    )
+    TEST_REPOSITORY_ID = "bb69cc12b4b06266"
 
     pipeline = RAGPipeline(
         repository_id=TEST_REPOSITORY_ID,
@@ -315,44 +253,20 @@ if __name__ == "__main__":
 
     question = "Where is Flask's HTTP exception handling implemented?"
 
-    print(
-        "\nGenerating answer..."
-    )
+    print("\nGenerating answer...")
 
-    result = pipeline.ask(
-        question
-    )
+    result = pipeline.ask(question)
 
-    print(
-        "\n" + "=" * 60
-    )
+    print("\n" + "=" * 60)
+    print("ANSWER")
+    print("=" * 60)
+    print(result["answer"])
 
-    print(
-        "ANSWER"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        result["answer"]
-    )
-
-    print(
-        "\n" + "=" * 60
-    )
-
-    print(
-        "SOURCES"
-    )
-
-    print(
-        "=" * 60
-    )
+    print("\n" + "=" * 60)
+    print("SOURCES")
+    print("=" * 60)
 
     for source in result["sources"]:
-
         print(
             f"{source['file_path']}:"
             f"{source['start_line']}-"

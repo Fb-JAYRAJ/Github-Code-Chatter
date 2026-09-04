@@ -31,7 +31,7 @@ def generate_rag_response(retriever, query: str, api_key: str) -> str:
     
     # 4. Setup Gemini LLM using a simple dictionary to satisfy Pydantic
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",
         temperature=0, 
         google_api_key=api_key,
         client_options={"api_endpoint": "generativelanguage.googleapis.com"}

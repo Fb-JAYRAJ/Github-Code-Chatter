@@ -1,3 +1,4 @@
+import time
 from backend.embeddings import GeminiEmbedder
 from backend.vector_store import CodeVectorStore
 
@@ -13,11 +14,7 @@ class CodeRetriever:
         repository_id: str,
         top_k: int = 5,
     ):
-        if not repository_id:
-            raise ValueError(
-                "repository_id cannot be empty."
-            )
-
+        # The empty string check has been removed to match ChromaDB metadata
         if top_k < 1:
             raise ValueError(
                 "top_k must be at least 1."
@@ -43,11 +40,34 @@ class CodeRetriever:
                 "Question cannot be empty."
             )
 
-        query_embedding = (
-            self.embedder.embed_query(
-                question
-            )
-        )
+        # -----------------------------------------------------
+        # Exponential Backoff Retry for API Rate Limits
+        # -----------------------------------------------------
+        max_retries = 3
+        query_embedding = None
+
+        for attempt in range(max_retries):
+            try:
+                query_embedding = (
+                    self.embedder.embed_query(
+                        question
+                    )
+                )
+                break  # Success, exit the retry loop
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    if attempt < max_retries - 1:
+                        wait_time = 5 * (attempt + 1)
+                        print(f"Rate limit hit. Retrying query embedding in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        raise RuntimeError(
+                            f"Embedding rate limit exceeded after {max_retries} retries. Please wait a minute and try again."
+                        )
+                else:
+                    raise e  # If it's a different error, raise it immediately
+
+        # -----------------------------------------------------
 
         results = self.vector_store.search(
             query_embedding=query_embedding,
@@ -114,11 +134,6 @@ class CodeRetriever:
                 else None
             )
 
-            # Convert cosine distance into a
-            # simple relevance score.
-            #
-            # Lower cosine distance means
-            # higher similarity.
             relevance_score = None
 
             if distance is not None:
@@ -245,87 +260,3 @@ class CodeRetriever:
         return "\n\n".join(
             context_parts
         )
-
-
-if __name__ == "__main__":
-
-    TEST_REPOSITORY_ID = (
-        "bb69cc12b4b06266"
-    )
-
-    retriever = CodeRetriever(
-        repository_id=TEST_REPOSITORY_ID,
-        top_k=5,
-    )
-
-    question = (
-        "How does Flask handle HTTP exceptions?"
-    )
-
-    print(
-        "\nSearching repository..."
-    )
-
-    results = retriever.retrieve(
-        question
-    )
-
-    print(
-        f"\nRetrieved {len(results)} chunks.\n"
-    )
-
-    for index, result in enumerate(
-        results,
-        start=1,
-    ):
-        source = result["source"]
-
-        print(
-            f"--- Result {index} ---"
-        )
-
-        print(
-            f"File: "
-            f"{source['file_path']}"
-        )
-
-        print(
-            f"Name: "
-            f"{source['name']}"
-        )
-
-        print(
-            f"Lines: "
-            f"{source['start_line']}-"
-            f"{source['end_line']}"
-        )
-
-        print(
-            f"Distance: "
-            f"{result['distance']}"
-        )
-
-        print(
-            f"Relevance: "
-            f"{result['relevance_score']:.4f}"
-        )
-
-        print()
-
-    print(
-        "\n" + "=" * 60
-    )
-
-    print(
-        "LLM CONTEXT"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        retriever.build_context(
-            results
-        )
-    )

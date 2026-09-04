@@ -1,81 +1,108 @@
-# app.py
-import os
 import streamlit as st
-from dotenv import load_dotenv
+from pathlib import Path
 
-# Import Aniket's backend function
-from backend.vector_store import initialize_github_vector_store
-# Import Jayraj's AI generation chain
-from frontend.llm_chain import generate_rag_response
+# Import Aniket's backend functions
+from backend.ingest import ingest_repository
+from backend.rag_pipeline import RAGPipeline
 
-# Load secret API keys from local .env file
-load_dotenv()
+st.set_page_config(page_title="GitHub Code Chatter", layout="wide")
+st.title("GitHub Code Chatter 💬")
 
-st.set_page_config(page_title="GitHub Code Chatter", page_icon="💻", layout="wide")
-st.title("💻 GitHub Repository Code Chatter")
-st.caption("Chat with any public GitHub repository using RAG & AST parsing")
+# 1. Initialize Session State for Chat and Indexing Status
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "is_indexed" not in st.session_state:
+    st.session_state.is_indexed = False
+if "repo_id" not in st.session_state:
+    st.session_state.repo_id = None
 
-# --- SIDEBAR: CONFIGURATION ---
+# 2. Sidebar: GitHub URL Input & Pipeline Trigger
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("Repository Setup")
+    repo_url = st.text_input("GitHub Repository URL:")
     
-    # Gemini API Key Security Toggle
-    use_custom_key = st.toggle("Use Custom Gemini API Key")
-    if use_custom_key:
-        api_key = st.text_input("Enter Gemini API Key", type="password")
-    else:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        st.caption("🔒 Using default developer `.env` key.")
-
-    st.divider()
-    
-    repo_url = st.text_input("Public GitHub Repo URL:", placeholder="https://github.com/user/repository")
-    index_btn = st.button("Index Repository")
-
-    if index_btn:
-        if not repo_url:
-            st.warning("Please enter a GitHub repository URL.")
-        elif not api_key:
-            st.error("Missing Gemini API Key! Add it to .env or toggle custom key.")
-        else:
-            with st.spinner("Cloning and indexing repository..."):
+    if st.button("Index Repository"):
+        if repo_url:
+            with st.spinner("Cloning & chunking codebase... (This may take a moment due to API limits)"):
                 try:
-                    # Call Aniket's backend function
-                    st.session_state.retriever = initialize_github_vector_store(repo_url)
-                    st.session_state.messages = [] # Reset chat for new repo
-                    st.success("Repository indexed successfully!")
+                    # Trigger the backend ingestion pipeline
+                    result = ingest_repository(repo_url=repo_url, batch_size=50)
+                    
+                    # FIX: Match the empty string currently saved in ChromaDB
+                    st.session_state.repo_id = "" 
+                    
+                    st.session_state.is_indexed = True
+                    st.success("Repository successfully parsed and stored in ChromaDB!")
+                    
+                    # Display the metrics returned by ingest.py
+                    st.divider()
+                    st.subheader("Indexing Metrics")
+                    st.write(f"**Python Files Parsed:** {result['python_files']}")
+                    st.write(f"**Code Chunks Extracted:** {result['chunks']}")
+                    st.write(f"**New Embeddings:** {result['embeddings']}")
+                    st.write(f"**Total Chunks in DB:** {result['stored_chunks']}")
+                    
                 except Exception as e:
-                    st.error(f"Failed to index repository: {e}")
+                    st.error(f"Ingestion failed: {e}")
+        else:
+            st.warning("Please enter a valid GitHub URL.")
 
-# --- MAIN CHAT INTERFACE ---
-if "retriever" not in st.session_state or st.session_state.retriever is None:
-    st.info("👈 Enter a public GitHub repository URL in the sidebar to start chatting.")
-else:
-    # Display previous messages
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
+# 3. Main Chat Interface
+# FIX: Use `is not None` because an empty string `""` evaluates to False in Python
+if st.session_state.is_indexed and st.session_state.repo_id is not None:
+    
+    # Render existing conversation
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            
+            # Re-render sources if they exist for assistant messages
+            if "sources" in message and message["sources"]:
+                with st.expander("View Source Files"):
+                    for source in message["sources"]:
+                        st.markdown(f"- `{source['file_path']}` (Lines {source['start_line']}-{source['end_line']})")
 
-    # User Input
-    if user_query := st.chat_input("Ask a question about this codebase..."):
-        # Display user message
-        st.session_state.messages.append({"role": "user", "content": user_query})
+    # Handle new user input
+    if prompt := st.chat_input("Ask how a specific function works..."):
+        
+        # Display user prompt
+        st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
-            st.markdown(user_query)
+            st.markdown(prompt)
 
-        # Generate Gemini Response
+        # Retrieve context and generate Gemini response
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing code chunks & generating response..."):
+            with st.spinner("Searching vector database and generating answer..."):
                 try:
-                    response_text = generate_rag_response(
-                        retriever=st.session_state.retriever,
-                        query=user_query,
-                        api_key=api_key
+                    # Initialize the pipeline with the current repo ID (which is now "")
+                    pipeline = RAGPipeline(
+                        repository_id=st.session_state.repo_id,
+                        top_k=5,
+                        model="gemini-3.6-flash"
                     )
-                    st.markdown(response_text)
-                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    
+                    # Get the response dictionary from rag_pipeline.py
+                    response = pipeline.ask(prompt)
+                    
+                    answer = response["answer"]
+                    sources = response["sources"]
+                    
+                    st.markdown(answer)
+                    
+                    # Display the sources cited in a clean expander
+                    if sources:
+                        with st.expander("View Source Files"):
+                            for source in sources:
+                                st.markdown(f"- `{source['file_path']}` (Lines {source['start_line']}-{source['end_line']})")
+                    
+                    # Save response and sources to session state
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": answer,
+                        "sources": sources
+                    })
+                    
                 except Exception as e:
-                    st.error(f"Error generating answer: {e}")
+                    st.error(f"An error occurred while generating the answer: {e}")
+else:
+    st.info("👈 Enter a GitHub URL in the sidebar to clone the repository and initialize the RAG pipeline.")
